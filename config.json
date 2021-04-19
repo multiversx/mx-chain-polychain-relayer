@@ -1,0 +1,30 @@
+{
+  "ElrondConfig": {
+    "ElrondChainID": "1",
+    "ElrondTxVersion": 1,
+    "ElrondBlockMonitorIntervalInSeconds": 10,
+    "BlocksPerBatch": 5,
+    "ElrondForceHeight": 0,
+    "RestURL": "https://gateway.elrond.com",
+    "SideChainID": 100,
+    "CrossChainManagerContract": "erd1qqqqqqqqqqqqqqqpqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqplllst77y11",
+    "BlockHeaderSyncContract": "erd1qqqqqqqqqqqqqqqpqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqplllst77y11",
+    "KeyStorePath": "wallet.json",
+    "KeyStorePwdSet": {
+      "addr1": "password"
+    }
+  },
+  "PolyConfig": {
+    "ChainID": 2,
+    "RestURL": "http://poly_ip:20336",
+    "EntranceContractAddress": "0300000000000000000000000000000000000000",
+    "OntUsefulBlocksNum": 1,
+    "WalletFile": "./wallet.dat",
+    "WalletPwd": "pwd",
+    "PolyStartHeight": 0,
+    "PolyMonitorIntervalSeconds": 10
+  },
+  "BoltDbPath": "./db",
+  "RoutineNum": 10,
+  "TargetContracts": []
+}
