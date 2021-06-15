@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/ElrondNetwork/elrond-polychain-relayer/cmd"
 	"os"
 	"os/signal"
 	"runtime"
@@ -16,20 +17,18 @@ import (
 	"github.com/urfave/cli"
 )
 
-const (
-	defaultConfigFilePath = "../config.json"
-)
 
 func setupApp() *cli.App {
 	app := cli.NewApp()
 	app.Usage = "Elrond relayer Service"
 	app.Action = startServer
 	app.Version = "v1.0.0"
-	app.Copyright = "Copyright in 2020 The Elrond Network"
+	app.Copyright = "Copyright in 2021 The Elrond Network"
 	app.Flags = []cli.Flag{
-		LogLevelFlag,
-		ConfigPathFlag,
-		LogDir,
+		cmd.LogLevelFlag,
+		cmd.ConfigPathFlag,
+		cmd.LogDir,
+
 	}
 	app.Commands = []cli.Command{}
 	app.Before = func(context *cli.Context) error {
@@ -40,44 +39,43 @@ func setupApp() *cli.App {
 }
 
 func startServer(ctx *cli.Context) {
-	logLevel := ctx.GlobalInt(GetFlagName(LogLevelFlag))
+	logLevel := ctx.GlobalInt(cmd.GetFlagName(cmd.LogLevelFlag))
 
-	ld := ctx.GlobalString(GetFlagName(LogDir))
+	ld := ctx.GlobalString(cmd.GetFlagName(cmd.LogDir))
 	log.InitLog(logLevel, ld, log.Stdout)
 
-	configPath := ctx.GlobalString(GetFlagName(ConfigPathFlag))
+	configPath := ctx.GlobalString(cmd.GetFlagName(cmd.ConfigPathFlag))
 
-	cfg := config.NewServiceConfig(configPath)
-	if cfg == nil {
+	servConfig := config.NewServiceConfig(configPath)
+	if servConfig == nil {
 		log.Errorf("startServer - create config failed!")
 		return
 	}
 
 	polySdk := sdk.NewPolySdk()
-	err := setUpPoly(polySdk, cfg.PolyConfig.RestURL)
-	if err != nil {
+	err := setUpPoly(polySdk, servConfig.PolyConfig.RestURL)
+	/*if err != nil {
 		log.Errorf("startServer - failed to setup poly sdk: %v", err)
 		return
-	}
+	}*/
 
-	elrondClient := tools.NewElrondClient(cfg.ElrondConfig.RestURL)
+	elrondClient := tools.NewElrondClient(servConfig.ElrondConfig.RestURL)
 
 	var boltDB *db.BoltDB
-	if cfg.BoltDbPath == "" {
+	if servConfig.BoltDbPath == "" {
 		boltDB, err = db.NewBoltDB("boltdb")
 	} else {
-		boltDB, err = db.NewBoltDB(cfg.BoltDbPath)
+		boltDB, err = db.NewBoltDB(servConfig.BoltDbPath)
 	}
 	if err != nil {
 		log.Fatalf("db.NewWaitingDB error:%s", err)
 		return
 	}
 
-	initElrondManager(cfg, polySdk, elrondClient, boltDB)
-	initPolyManager(cfg, polySdk, elrondClient, boltDB)
+	//initPolyManager(servConfig, polySdk, elrondClient, boltDB)
+	initElrondManager(servConfig, polySdk, elrondClient, boltDB)
 
 	waitToExit()
-
 }
 
 func initElrondManager(servConfig *config.ServiceConfig, polysdk *sdk.PolySdk, elrondClient *tools.ElrondClient, boltDB *db.BoltDB) {
@@ -88,6 +86,8 @@ func initElrondManager(servConfig *config.ServiceConfig, polysdk *sdk.PolySdk, e
 	}
 
 	go elrondManager.MonitorChain()
+	go elrondManager.MonitorDeposit()
+	go elrondManager.CheckDeposit()
 }
 
 func initPolyManager(servConfig *config.ServiceConfig, polysdk *sdk.PolySdk, elrondClient *tools.ElrondClient, boltDB *db.BoltDB) {

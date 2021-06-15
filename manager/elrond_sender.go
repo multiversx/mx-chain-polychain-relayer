@@ -131,52 +131,65 @@ func (es *ElrondSender) verifyHeader(header *polytypes.Header) error {
 	sink := common2.NewZeroCopySink(nil)
 	_ = header.Serialization(sink)
 
-	ep := blockchain.NewElrondProxy(es.proxyURL)
-	networkConfig, err := ep.GetNetworkConfig()
-	if err != nil {
-		return err
-	}
-
 	dataField := []byte("verifyHeader@" + hex.EncodeToString(sink.Bytes()))
 
-	account, err := es.getAccount()
+	tx, err := es.CreateTx(dataField, es.blockHeaderSyncContractAddress)
 	if err != nil {
 		return err
 	}
-
-	tx := &data.Transaction{
-		Nonce:    account.Nonce,
-		Value:    "0",
-		RcvAddr:  es.blockHeaderSyncContractAddress,
-		SndAddr:  account.Address,
-		GasPrice: networkConfig.MinGasPrice,
-		// TODO calculate gas
-		GasLimit: networkConfig.MinGasLimit,
-		Data:     dataField,
-		ChainID:  networkConfig.ChainID,
-		Version:  networkConfig.MinTransactionVersion,
-	}
-
-	err = erdgo.SignTransaction(tx, es.privateKey)
-	if err != nil {
-		return err
-	}
-
-	txHash, err := ep.SendTransaction(tx)
-	if err != nil {
-		return err
-	}
-
-	isSuccess := es.waitTransactionToBeExecuted(txHash)
-	if !isSuccess {
-		// TODO what we should do if transaction is failed or invalid
-		return errors.New("transaction is not ok")
-	}
+	txHash, err:= es.SendTx(tx)
 
 	log.Infof("successful verify poly header to elrond: (header_hash: %s, height: %d))",
 		txHash, header.Height)
 
 	return nil
+}
+
+func (es *ElrondSender) CreateTx(dataValue []byte, rcvAddr string) (*data.Transaction, error) {
+	account, err := es.getAccount()
+	if err != nil {
+		return nil, err
+	}
+	ep := blockchain.NewElrondProxy(es.proxyURL)
+	networkConfig, err := ep.GetNetworkConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return &data.Transaction{
+		Nonce:    account.Nonce,
+		Value:    "0",
+		RcvAddr:  rcvAddr,
+		SndAddr:  account.Address,
+		GasPrice: networkConfig.MinGasPrice,
+		// TODO calculate gas
+		GasLimit: networkConfig.MinGasLimit,
+		Data:     dataValue,
+		ChainID:  networkConfig.ChainID,
+		Version:  networkConfig.MinTransactionVersion,
+	}, nil
+}
+
+func (es *ElrondSender) SendTx(tx *data.Transaction) (string, error) {
+	ep := blockchain.NewElrondProxy(es.proxyURL)
+
+	err := erdgo.SignTransaction(tx, es.privateKey)
+	if err != nil {
+		return "", err
+	}
+
+	txHash, err := ep.SendTransaction(tx)
+	if err != nil {
+		return "", err
+	}
+
+	isSuccess := es.waitTransactionToBeExecuted(txHash)
+	if !isSuccess {
+		// TODO what we should do if transaction is failed or invalid
+		return "", errors.New("transaction is not ok")
+	}
+
+	return txHash, err
 }
 
 func (es *ElrondSender) GetBalance() (*big.Int, error) {

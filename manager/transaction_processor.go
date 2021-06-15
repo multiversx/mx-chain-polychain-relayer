@@ -30,10 +30,11 @@ func (tp *transactionProc) computeCrossChainTransfer(blockNonce uint64, tx *data
 		return nil, err
 	}
 
-	value, err := tp.getPaymentForTxData(polyTxHash)
-	if err != nil {
+	value, _ := tp.getPaymentForTxData(polyTxHash)
+	/*if err != nil {
 		return nil, err
-	}
+	}*/
+	value = tx.Data
 
 	decodedTxHash, _ := hex.DecodeString(tx.Hash)
 
@@ -53,6 +54,7 @@ func (tp *transactionProc) getNextPendingCrossChainTxData(tx *data.FullTransacti
 	query := &data.VmValueRequest{
 		Address:  tp.crossChainManagerContractAddress,
 		FuncName: "getNextPendingCrossChainTx",
+		CallerAddr: "erd1qyu5wthldzr8wx5c9ucg8kjagg0jfs53s8nr3zpz3hypefsdd8ssycr6th",
 	}
 	queryResponse, err := tp.elrondClient.ExecuteQuery(query)
 	if err != nil {
@@ -65,7 +67,7 @@ func (tp *transactionProc) getNextPendingCrossChainTxData(tx *data.FullTransacti
 func (tp *transactionProc) getPaymentForTxData(polyTxHash []byte) ([]byte, error) {
 	query := &data.VmValueRequest{
 		Address:  tp.crossChainManagerContractAddress,
-		FuncName: "getNextPendingCrossChainTx",
+		FuncName: "getTxByHash",
 		Args:     []string{hex.EncodeToString(polyTxHash)},
 	}
 	queryResponse, err := tp.elrondClient.ExecuteQuery(query)

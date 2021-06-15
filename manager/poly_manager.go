@@ -126,14 +126,17 @@ func (pm *PolyManager) MonitorChain() {
 			log.Infof("PolyManager - poly chain current height: %d", latestHeight)
 			blockHandleResult = true
 			for pm.syncedHeight <= latestHeight-pm.cfg.PolyConfig.OntUsefulBlocksNum {
+				if pm.syncedHeight%10 == 0 {
+					log.Infof("handle confirmed poly Block height: %d", pm.syncedHeight)
+				}
 				blockHandleResult = pm.handleDepositEvents(pm.syncedHeight, latestHeight)
 				if blockHandleResult == false {
 					break
 				}
 				pm.syncedHeight++
-				if err = pm.db.UpdatePolyHeight(pm.syncedHeight - 1); err != nil {
-					log.Errorf("PolyManager - failed to save height of poly: %v", err)
-				}
+			}
+			if err = pm.db.UpdatePolyHeight(pm.syncedHeight - 1); err != nil {
+				log.Errorf("PolyManager - failed to save height of poly: %v", err)
 			}
 		case <-pm.exitChan:
 			return

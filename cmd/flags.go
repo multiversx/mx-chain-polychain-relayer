@@ -1,10 +1,13 @@
-package main
+package cmd
 
 import (
 	"strings"
 
 	"github.com/ElrondNetwork/elrond-polychain-relayer/log"
 	"github.com/urfave/cli"
+)
+const (
+	defaultConfigFilePath = "./config.json"
 )
 
 var (
