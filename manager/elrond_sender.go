@@ -1,25 +1,37 @@
 package manager
 
 import (
-	"bytes"
 	"encoding/hex"
-	"errors"
+	"encoding/json"
+	"github.com/ElrondNetwork/elrond-go-core/data/transaction"
+	"github.com/ElrondNetwork/elrond-go-crypto/signing"
+	"github.com/ElrondNetwork/elrond-go-crypto/signing/ed25519"
+	"github.com/ElrondNetwork/elrond-go-crypto/signing/ed25519/singlesig"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/interactors"
 	"math/big"
+	"math/rand"
+	"strconv"
 	"time"
 
-	"github.com/ElrondNetwork/elrond-go/data/transaction"
 	"github.com/ElrondNetwork/elrond-polychain-relayer/config"
 	"github.com/ElrondNetwork/elrond-polychain-relayer/log"
 	"github.com/ElrondNetwork/elrond-polychain-relayer/tools"
-	dataProxy "github.com/ElrondNetwork/elrond-proxy-go/data"
-	"github.com/ElrondNetwork/elrond-sdk/erdgo"
-	"github.com/ElrondNetwork/elrond-sdk/erdgo/blockchain"
-	"github.com/ElrondNetwork/elrond-sdk/erdgo/data"
-	"github.com/ontio/ontology-crypto/signature"
-	common2 "github.com/polynetwork/poly/common"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/blockchain"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/data"
+	vm "github.com/ElrondNetwork/elrond-sdk-erdgo/data"
 	polytypes "github.com/polynetwork/poly/core/types"
 	common3 "github.com/polynetwork/poly/native/service/cross_chain_manager/common"
 )
+
+const (
+	DefaultGasLimit = 60000000
+	ChanLen         = 64
+)
+
+type ErdTxInfo struct {
+	tx         *data.Transaction
+	polyTxHash string
+}
 
 type ElrondSender struct {
 	proxyURL                       string
@@ -27,15 +39,19 @@ type ElrondSender struct {
 	blockHeaderSyncContractAddress string
 	crossChainManagementAddress    string
 	address                        string
+	routineNum                     int64
+	cmap                           map[string]chan *ErdTxInfo
 	client                         *tools.ElrondClient
 }
 
-func NewElrondSender(privKey []byte, cfg *config.ElrondConfig) (*ElrondSender, error) {
+func NewElrondSender(privKey []byte, cfg *config.ServiceConfig) (*ElrondSender, error) {
 	elrondSender := &ElrondSender{
 		privateKey:                     privKey,
-		proxyURL:                       cfg.RestURL,
-		blockHeaderSyncContractAddress: cfg.BlockHeaderSyncContract,
-		crossChainManagementAddress:    cfg.CrossChainManagerContract,
+		proxyURL:                       cfg.ElrondConfig.RestURL,
+		blockHeaderSyncContractAddress: cfg.ElrondConfig.BlockHeaderSyncContract,
+		crossChainManagementAddress:    cfg.ElrondConfig.CrossChainManagerContract,
+		client:                         tools.NewElrondClient(cfg.ElrondConfig.RestURL),
+		routineNum:                     cfg.RoutineNum,
 	}
 
 	account, err := elrondSender.getAccount()
@@ -57,29 +73,18 @@ func (es *ElrondSender) CommitDepositEventsWithHeader(
 	rawAuditPath []byte,
 ) bool {
 	var (
-		sigs       []byte
-		headerData []byte
+		sigs []byte
 	)
 	if anchorHeader != nil && headerProof != "" {
-		for _, sig := range anchorHeader.SigData {
-			temp := make([]byte, len(sig))
-			copy(temp, sig)
-			newsig, _ := signature.ConvertToEthCompatible(temp)
-			sigs = append(sigs, newsig...)
-		}
+		sigs = es.convertSignatures(anchorHeader.SigData)
 	} else {
-		for _, sig := range header.SigData {
-			temp := make([]byte, len(sig))
-			copy(temp, sig)
-			newsig, _ := signature.ConvertToEthCompatible(temp)
-			sigs = append(sigs, newsig...)
-		}
+		sigs = es.convertSignatures(header.SigData)
 	}
 
 	fromTx := [32]byte{}
 	copy(fromTx[:], param.TxHash[:32])
 
-	res, err := es.checkIfFromChainTxExist(fromTx[:])
+	res, err := es.checkIfFromChainTxExist(param.FromChainID, fromTx[:])
 	if err != nil {
 		log.Errorf("ElrondSender checkIfFromChainTxExist - failed to check transaction err: %v", err)
 	}
@@ -90,56 +95,112 @@ func (es *ElrondSender) CommitDepositEventsWithHeader(
 		return true
 	}
 
-	err = es.verifyHeader(header)
-	if err != nil {
-		log.Errorf("ElrondSender verifyHeader - failed to verify header err: %v", err)
+	rawHeader := header.GetMessage()
+	var rawAnchorHeader []byte
+	if anchorHeader != nil {
+		rawAnchorHeader = anchorHeader.GetMessage()
 	}
 
-	_ = headerData
+	dataField := "verifyHeaderAndExecuteTx@" + hex.EncodeToString(rawAuditPath) + "@" + hex.EncodeToString(rawHeader) + "@" +
+		headerProof + "@" + hex.EncodeToString(rawAnchorHeader) + "@" + hex.EncodeToString(sigs)
 
-	// TODO continue implementation
+	tx, err := es.CreateTx([]byte(dataField), es.crossChainManagementAddress)
+	if err != nil {
+		return false
+	}
+
+	k := es.getRouter()
+	c, ok := es.cmap[k]
+	if !ok {
+		c = make(chan *ErdTxInfo, ChanLen)
+		es.cmap[k] = c
+		go func() {
+			for v := range c {
+				if txHash, err := es.SendTx(v); err != nil {
+					log.Errorf("failed to send tx to erd: error: %v, txHash: %s", err, txHash)
+				}
+			}
+		}()
+	}
+
+	c <- &ErdTxInfo{
+		tx:         tx,
+		polyTxHash: polyTxHash,
+	}
+
 	return true
 }
 
-func (es *ElrondSender) checkIfFromChainTxExist(txHash []byte) (bool, error) {
-	vmRequest := &dataProxy.VmValueRequest{
-		Address:    es.crossChainManagementAddress,
-		FuncName:   "currentHeight",
+func (es *ElrondSender) GetCurrentEpochStartHeight(contractAddress string) (uint64, error) {
+
+	vmRequest := &vm.VmValueRequest{
+		Address:    contractAddress,
+		FuncName:   "getCurrentEpochStartHeight",
 		CallerAddr: "",
 		CallValue:  "",
-		Args:       []string{hex.EncodeToString(txHash)},
+	}
+
+	response, err := es.client.ExecuteQuery(vmRequest)
+	if err != nil || response.Data.ReturnData == nil || len(response.Data.ReturnData[0]) == 0 {
+		return 0, err
+	}
+
+	bigIntValue := big.NewInt(0).SetBytes(response.Data.ReturnData[0])
+	startOfEpochHeight := bigIntValue.Uint64()
+
+	return startOfEpochHeight, err
+}
+
+func (es *ElrondSender) checkIfFromChainTxExist(fromChainId uint64, txHash []byte) (bool, error) {
+
+	vmRequest := &vm.VmValueRequest{
+		Address:    es.crossChainManagementAddress,
+		FuncName:   "txExists",
+		CallerAddr: "",
+		CallValue:  "",
+		Args:       []string{hex.EncodeToString(txHash), hex.EncodeToString(tools.Uint64ToBytes(fromChainId))},
 	}
 
 	res, err := es.client.ExecuteQuery(vmRequest)
-	if err != nil {
+	if err != nil || res.Data.ReturnData == nil {
 		return false, err
 	}
 
-	// TODO check response "exists" is not ok
-	if bytes.Equal(res.Data.ReturnData[0], []byte("exists")) {
+	if len(res.Data.ReturnData[0]) > 0 && res.Data.ReturnData[0][0] == 1 {
 		return true, nil
 	}
 
 	return false, nil
 }
 
-func (es *ElrondSender) CommitHeader(header *polytypes.Header) error {
-	return nil
-}
+func (es *ElrondSender) CommitHeader(header *polytypes.Header, publicKeys []byte) error {
+	var (
+		sigs []byte
+	)
+	for _, sig := range header.SigData {
+		temp := make([]byte, len(sig))
+		copy(temp, sig)
+		newsig, _ := ConvertToErdCompatible(temp)
+		sigs = append(sigs, newsig...)
+	}
 
-func (es *ElrondSender) verifyHeader(header *polytypes.Header) error {
-	sink := common2.NewZeroCopySink(nil)
-	_ = header.Serialization(sink)
+	rawHeader := header.GetMessage()
 
-	dataField := []byte("verifyHeader@" + hex.EncodeToString(sink.Bytes()))
+	dataField := "syncBlockHeader@" + hex.EncodeToString(rawHeader) + "@" +
+		hex.EncodeToString(publicKeys) + "@" + hex.EncodeToString(sigs)
 
-	tx, err := es.CreateTx(dataField, es.blockHeaderSyncContractAddress)
+	tx, err := es.CreateTx([]byte(dataField), es.blockHeaderSyncContractAddress)
 	if err != nil {
 		return err
 	}
-	txHash, err:= es.SendTx(tx)
 
-	log.Infof("successful verify poly header to elrond: (header_hash: %s, height: %d))",
+	txHash, err := es.SendTx(&ErdTxInfo{tx: tx})
+	if err != nil {
+		log.Errorf("failed to relay poly header to erd: (header_hash: %s, height: %d, erd_txHash: %s, nonce: %d)",
+			header.Hash(), header.Height, txHash, tx.Nonce)
+		return err
+	}
+	log.Infof("successful send poly header to erd: (tx_hash: %s, height: %d))",
 		txHash, header.Height)
 
 	return nil
@@ -150,46 +211,70 @@ func (es *ElrondSender) CreateTx(dataValue []byte, rcvAddr string) (*data.Transa
 	if err != nil {
 		return nil, err
 	}
-	ep := blockchain.NewElrondProxy(es.proxyURL)
+	ep := blockchain.NewElrondProxy(es.proxyURL, nil)
 	networkConfig, err := ep.GetNetworkConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	return &data.Transaction{
+	tx := &data.Transaction{
 		Nonce:    account.Nonce,
 		Value:    "0",
 		RcvAddr:  rcvAddr,
 		SndAddr:  account.Address,
 		GasPrice: networkConfig.MinGasPrice,
-		// TODO calculate gas
-		GasLimit: networkConfig.MinGasLimit,
+		GasLimit: DefaultGasLimit,
 		Data:     dataValue,
 		ChainID:  networkConfig.ChainID,
 		Version:  networkConfig.MinTransactionVersion,
-	}, nil
-}
-
-func (es *ElrondSender) SendTx(tx *data.Transaction) (string, error) {
-	ep := blockchain.NewElrondProxy(es.proxyURL)
-
-	err := erdgo.SignTransaction(tx, es.privateKey)
-	if err != nil {
-		return "", err
 	}
 
-	txHash, err := ep.SendTransaction(tx)
+	if err = es.SignTransaction(tx, es.privateKey); err != nil {
+		return nil, err
+	}
+
+	gasLimit, err := ep.RequestTransactionCost(tx)
+	if err != nil {
+		tx.GasLimit = gasLimit.TxCost * 2
+	}
+
+	return tx, nil
+}
+
+func (es *ElrondSender) SendTx(txInfo *ErdTxInfo) (string, error) {
+	ep := blockchain.NewElrondProxy(es.proxyURL, nil)
+
+	txHash, err := ep.SendTransaction(txInfo.tx)
 	if err != nil {
 		return "", err
 	}
 
 	isSuccess := es.waitTransactionToBeExecuted(txHash)
-	if !isSuccess {
-		// TODO what we should do if transaction is failed or invalid
-		return "", errors.New("transaction is not ok")
+	if isSuccess {
+		log.Infof("successful to relay tx to erd: (erd_hash: %s, nonce: %d, poly_hash: %s, eth_explorer: %s)",
+			txHash, txInfo.tx.Nonce, txInfo.polyTxHash)
+	} else {
+		log.Errorf("failed to relay tx to erd: (erd_hash: %s, nonce: %d poly_hash: %s, eth_explorer: %s)",
+			txHash, txInfo.tx.Nonce, txInfo.polyTxHash)
 	}
 
 	return txHash, err
+}
+
+func (es *ElrondSender) getRouter() string {
+	var router string
+
+	for maxRetry := 10; maxRetry > 0; maxRetry-- {
+		router = strconv.FormatInt(rand.Int63n(es.routineNum), 10)
+		c, ok := es.cmap[router]
+		if !ok {
+			return router
+		} else if len(c) < ChanLen {
+			return router
+		}
+	}
+
+	return strconv.FormatInt(rand.Int63n(es.routineNum), 10)
 }
 
 func (es *ElrondSender) GetBalance() (*big.Int, error) {
@@ -207,13 +292,14 @@ func (es *ElrondSender) GetAddress() string {
 }
 
 func (es *ElrondSender) getAccount() (*data.Account, error) {
-	ep := blockchain.NewElrondProxy(es.proxyURL)
-	addressString, err := erdgo.GetAddressFromPrivateKey(es.privateKey)
+	ep := blockchain.NewElrondProxy(es.proxyURL, nil)
+	wallet := interactors.NewWallet()
+	addressString, err := wallet.GetAddressFromPrivateKey(es.privateKey)
 	if err != nil {
 		return nil, err
 	}
 
-	address, err := data.NewAddressFromBech32String(addressString)
+	address, err := data.NewAddressFromBech32String(addressString.AddressAsBech32String())
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +308,16 @@ func (es *ElrondSender) getAccount() (*data.Account, error) {
 }
 
 func (es *ElrondSender) waitTransactionToBeExecuted(txHash string) bool {
-	// TODO treat case when something went wrong with the transaction
-	ep := blockchain.NewElrondProxy(es.proxyURL)
-	for {
+	// TODO treat case when something went wrong with the
+
+	maxRetry := 3
+
+	ep := blockchain.NewElrondProxy(es.proxyURL, nil)
+	for maxRetry > 0 {
 		time.Sleep(2 * time.Second)
 		status, err := ep.GetTransactionStatus(txHash)
-		if err != nil {
+		if err != nil && maxRetry > 0 {
+			maxRetry--
 			continue
 		}
 
@@ -240,4 +330,57 @@ func (es *ElrondSender) waitTransactionToBeExecuted(txHash string) bool {
 			return false
 		}
 	}
+	return false
+}
+
+func (es *ElrondSender) GetBookkeepers() []byte {
+	ep := blockchain.NewElrondProxy(es.proxyURL, nil)
+
+	request := &data.VmValueRequest{Address: es.blockHeaderSyncContractAddress,
+		FuncName:   "getConsensusPeers",
+		CallerAddr: es.GetAddress(),
+		CallValue:  "0",
+	}
+
+	response, err := ep.ExecuteVMQuery(request)
+
+	if err == nil && response.Data.ReturnData != nil && len(response.Data.ReturnData[0]) > 0 {
+		return response.Data.ReturnData[0]
+	}
+
+	return nil
+}
+
+// SignTransaction signs a transaction with the provided private key
+func (es *ElrondSender) SignTransaction(tx *data.Transaction, privateKey []byte) error {
+	tx.Signature = ""
+	txSingleSigner := &singlesig.Ed25519Signer{}
+	suite := ed25519.NewEd25519()
+	keyGen := signing.NewKeyGenerator(suite)
+	txSignPrivKey, err := keyGen.PrivateKeyFromByteArray(privateKey)
+	if err != nil {
+		return err
+	}
+	bytes, err := json.Marshal(&tx)
+	if err != nil {
+		return err
+	}
+	signature, err := txSingleSigner.Sign(txSignPrivKey, bytes)
+	if err != nil {
+		return err
+	}
+	tx.Signature = hex.EncodeToString(signature)
+
+	return nil
+}
+
+func (es *ElrondSender) convertSignatures(rawSigs [][]byte) []byte {
+	var sigs []byte
+	for _, sig := range rawSigs {
+		temp := make([]byte, len(sig))
+		copy(temp, sig)
+		newSig, _ := ConvertToErdCompatible(temp)
+		sigs = append(sigs, newSig...)
+	}
+	return sigs
 }

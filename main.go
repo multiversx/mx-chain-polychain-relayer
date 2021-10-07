@@ -17,7 +17,6 @@ import (
 	"github.com/urfave/cli"
 )
 
-
 func setupApp() *cli.App {
 	app := cli.NewApp()
 	app.Usage = "Elrond relayer Service"
@@ -28,7 +27,6 @@ func setupApp() *cli.App {
 		cmd.LogLevelFlag,
 		cmd.ConfigPathFlag,
 		cmd.LogDir,
-
 	}
 	app.Commands = []cli.Command{}
 	app.Before = func(context *cli.Context) error {
@@ -54,10 +52,11 @@ func startServer(ctx *cli.Context) {
 
 	polySdk := sdk.NewPolySdk()
 	err := setUpPoly(polySdk, servConfig.PolyConfig.RestURL)
-	/*if err != nil {
+
+	if err != nil {
 		log.Errorf("startServer - failed to setup poly sdk: %v", err)
 		return
-	}*/
+	}
 
 	elrondClient := tools.NewElrondClient(servConfig.ElrondConfig.RestURL)
 
@@ -72,7 +71,7 @@ func startServer(ctx *cli.Context) {
 		return
 	}
 
-	//initPolyManager(servConfig, polySdk, elrondClient, boltDB)
+	initPolyManager(servConfig, polySdk, elrondClient, boltDB)
 	initElrondManager(servConfig, polySdk, elrondClient, boltDB)
 
 	waitToExit()
