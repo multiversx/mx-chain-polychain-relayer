@@ -1,11 +1,9 @@
 package manager
 
 import (
-	"encoding/hex"
-	"fmt"
+	"math/big"
 
 	"github.com/ElrondNetwork/elrond-polychain-relayer/tools"
-	"github.com/ElrondNetwork/elrond-proxy-go/data"
 	"github.com/polynetwork/poly/common"
 )
 
@@ -24,118 +22,58 @@ func NewTransactionsProcessor(
 	}, nil
 }
 
-func (tp *transactionProc) computeCrossChainTransfer(blockNonce uint64, tx *data.FullTransaction) (*CrossTransfer, error) {
-	polyTxHash, txIndex, toChainID, err := tp.getNextPendingCrossChainTxData(tx)
+func (tp *transactionProc) computeCrossChainTransfer(hash string, nonce uint64) (*CrossTransfer, []byte, []byte, uint64, error) {
+	tx, err := tp.elrondClient.GetTransactionByHash(hash)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, 0, err
+	}
+	var rawEvent []byte
+	if tx.Logs != nil {
+		rawEvent = tx.Logs.Events[0].Data
 	}
 
-	value, _ := tp.getPaymentForTxData(polyTxHash)
-	/*if err != nil {
-		return nil, err
-	}*/
-	value = tx.Data
-
-	decodedTxHash, _ := hex.DecodeString(tx.Hash)
+	txEvent := tp.NewTransactionEventFromBytes(rawEvent)
+	index := big.NewInt(0)
+	index.SetBytes(txEvent.crossChainTxId)
 
 	return &CrossTransfer{
-		txIndex: fmt.Sprintf("%d", txIndex),
-		txId:    decodedTxHash,
-		value:   value,
-		toChain: toChainID,
-		height:  blockNonce,
-	}, nil
+		txIndex: tools.EncodeBigInt(index),
+		txId:    txEvent.sourceChainTxHash.ToArray(),
+		value:   rawEvent,
+		toChain: uint32(txEvent.toChainId),
+		height:  nonce,
+	}, txEvent.crossChainTxId, txEvent.assetHash, txEvent.toChainId, nil
 }
 
-func (tp *transactionProc) getNextPendingCrossChainTxData(tx *data.FullTransaction) ([]byte, uint64, uint32, error) {
-	// TODO add checks if tx correspond with the next pending cross tx
-	_ = tx
-
-	query := &data.VmValueRequest{
-		Address:  tp.crossChainManagerContractAddress,
-		FuncName: "getNextPendingCrossChainTx",
-		CallerAddr: "erd1qyu5wthldzr8wx5c9ucg8kjagg0jfs53s8nr3zpz3hypefsdd8ssycr6th",
-	}
-	queryResponse, err := tp.elrondClient.ExecuteQuery(query)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-
-	return getTxIndexAndToChainID(queryResponse.Data.ReturnData[0])
+type transactionEvent struct {
+	sourceChainTxHash   common.Uint256
+	crossChainTxId      []byte
+	fromContractAddress []byte
+	toChainId           uint64
+	toContractAddress   []byte
+	methodName          []byte
+	assetHash           []byte
+	destinationAddress  []byte
+	amount              common.Uint256
 }
 
-func (tp *transactionProc) getPaymentForTxData(polyTxHash []byte) ([]byte, error) {
-	query := &data.VmValueRequest{
-		Address:  tp.crossChainManagerContractAddress,
-		FuncName: "getTxByHash",
-		Args:     []string{hex.EncodeToString(polyTxHash)},
-	}
-	queryResponse, err := tp.elrondClient.ExecuteQuery(query)
-	if err != nil {
-		return nil, err
-	}
+func (tp *transactionProc) NewTransactionEventFromBytes(buffer []byte) *transactionEvent {
+	sink := common.NewZeroCopySource(buffer)
+	txEvent := &transactionEvent{}
 
-	return getTxValueFromData(queryResponse.Data.ReturnData[0])
-}
+	txEvent.sourceChainTxHash, _ = sink.NextHash()
+	txEvent.crossChainTxId, _ = sink.NextVarBytes()
+	txEvent.fromContractAddress, _ = sink.NextVarBytes()
+	txEvent.toChainId, _ = sink.NextUint64()
+	txEvent.toContractAddress, _ = sink.NextVarBytes()
+	txEvent.methodName, _ = sink.NextVarBytes()
 
-func getTxIndexAndToChainID(dataBytes []byte) ([]byte, uint64, uint32, error) {
-	sink := common.NewZeroCopySource(dataBytes)
+	args, _ := sink.NextVarBytes()
+	sinkArgs := common.NewZeroCopySource(args)
 
-	txHash, eof := sink.NextBytes(32)
-	if eof {
-		return nil, 0, 0, fmt.Errorf("cannot deserialize hash")
-	}
+	txEvent.assetHash, _ = sinkArgs.NextVarBytes()
+	txEvent.destinationAddress, _ = sinkArgs.NextVarBytes()
+	txEvent.amount, _ = sinkArgs.NextHash()
 
-	txNonce, eof := sink.NextUint64()
-	if eof {
-		return nil, 0, 0, fmt.Errorf("cannot deserialize id")
-	}
-
-	_, eof = sink.NextBytes(32)
-	if eof {
-		return nil, 0, 0, fmt.Errorf("cannot deserialize from_contract_address")
-	}
-
-	toChain, eof := sink.NextUint64()
-	if eof {
-		return nil, 0, 0, fmt.Errorf("cannot deserialize to_chain_id")
-	}
-
-	return txHash, txNonce, uint32(toChain), nil
-}
-
-func getTxValueFromData(dataBytes []byte) ([]byte, error) {
-	sink := common.NewZeroCopySource(dataBytes)
-
-	_, eof := sink.NextBytes(32)
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize sender")
-	}
-
-	_, eof = sink.NextBytes(32)
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize eof")
-	}
-
-	lengthNextParam, eof := sink.NextVarUint()
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize lenght next parameter token_id")
-	}
-
-	_, eof = sink.NextBytes(lengthNextParam)
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize token_id")
-	}
-
-	lengthNextParam, eof = sink.NextVarUint()
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize lenght next parameter amount")
-	}
-
-	amount, eof := sink.NextBytes(lengthNextParam)
-	if eof {
-		return nil, fmt.Errorf("cannot deserialize amount")
-	}
-
-	return amount, nil
+	return txEvent
 }
