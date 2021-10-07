@@ -1,0 +1,38 @@
+{
+  "ElrondConfig": {
+    "ElrondChainID": "1",
+    "ElrondTxVersion": 1,
+    "ElrondBlockMonitorIntervalInSeconds": 6,
+    "BlocksPerBatch": 15,
+    "ElrondForceHeight": 0,
+    "RestURL": "https://devnet-gateway.elrond.com",
+    "SideChainID": 100,
+    "CrossChainManagerContract": "erd1qqqqqqqqqqqqqpgqgks3vhv8x37epvd549a0mp4qz7vytxdrd8sslhlrn3",
+    "BlockHeaderSyncContract": "erd1qqqqqqqqqqqqqpgqfjw7n3atdwa7ln7rftj0d5rfthzvl899d8ss4muhhr",
+    "KeyStorePath": "/home/cvg/Desktop/elrond/repo/poly-integration/wallet/files",
+    "KeyStorePwdSet": {
+      "erd1gmpv5h4mw4tkn2lsh6mz27wy6m27g3qk3qxfp3qdp84qmufudjlq7z0e8g": "Testpasswd1&",
+      "erd1pm0c0nm3t86lfvc9yj770ptde0uk07z6kj4kk4adv4ua0txa9t5sgnw9jv": "Testpasswd2&"
+    }
+  },
+  "PolyConfig": {
+    "ChainID": 2,
+    "RestURL": "http://beta1.poly.network:20336",
+    "EntranceContractAddress": "0300000000000000000000000000000000000000",
+    "OntUsefulBlocksNum": 1,
+    "WalletFile": "./wallet.dat",
+    "WalletPwd": "pwd",
+    "PolyStartHeight": 0,
+    "PolyMonitorIntervalSeconds": 10
+  },
+  "BoltDbPath": "./db",
+  "RoutineNum": 10,
+  "TargetContracts": [
+    {
+      "erd1608h3ce7ptvyracgrudx6c8hp32c70hnwrhzskeejquv0y8753ksl9uept": {
+        "inbound": [6],
+        "outbound": [6]
+      }
+    }
+  ]
+}
