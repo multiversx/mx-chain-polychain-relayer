@@ -1,60 +1,39 @@
 package manager
 
 import (
-	"encoding/hex"
 	"fmt"
+	tools "github.com/ElrondNetwork/elrond-polychain-relayer/tools"
+	"github.com/stretchr/testify/require"
 	"math/big"
 	"testing"
-
-	"github.com/polynetwork/poly/common"
 )
 
-func TestPendingTx(t *testing.T) {
-	myTx := "25a4fa887af0bb300e21a4bf8c6a7101a17c2039af36ae9b33b32ee962e64039000000000000000000000000000000000000000000000000000000000000000000000000000000002a000000000000000139472eff6886771a982f3083da5d421f24c29181e63888228dc81ca60d69e10d66756e6374696f6e5f6e616d650308617267756d656e74030201010164"
-	decoded, _ := hex.DecodeString(myTx)
+func TestNewTransactionEventFromBytes(t *testing.T) {
+	ec := tools.NewElrondClient("https://devnet-gateway.elrond.com")
 
-	sink := common.NewZeroCopySource(decoded)
+	tx, err := ec.GetTransactionByHash("dd79517926062cf1a8c0a06bd54c1bdaa96e9e37d2f3cf554da49564f578da6a")
 
-	txIndex, eof := sink.NextBytes(32)
-	fmt.Println(hex.EncodeToString(txIndex))
-	fmt.Println(eof)
+	tp := transactionProc{}
+	txEvent := tp.NewTransactionEventFromBytes(tx.Logs.Events[0].Data)
 
-	value, eof := sink.NextUint64()
-	fmt.Println(value)
-	fmt.Println(eof)
+	index := big.NewInt(0)
+	index.SetBytes(txEvent.crossChainTxId)
+	fmt.Println(tools.EncodeBigInt(index))
 
-	add, eof := sink.NextBytes(32)
-	fmt.Println(add)
-	fmt.Println(eof)
+	fmt.Println(tx.Logs.Events[0].Identifier)
 
-	toChain, eof := sink.NextUint64()
-	fmt.Println(toChain)
-	fmt.Println(eof)
-
-	toContractAddress, eof := sink.NextBytes(32)
-	fmt.Println(hex.EncodeToString(toContractAddress))
-	fmt.Println(eof)
+	require.Nil(t, err)
 }
 
-func TestEsdtPayment(t *testing.T) {
-	esdtPayment := "0139472eff6886771a982f3083da5d421f24c29181e63888228dc81ca60d69e100000000000000000000000000000000000000000000000000000000000000000b5772617070656445676c6403989680"
-	decoded, _ := hex.DecodeString(esdtPayment)
+func Test_transactionProc_computeCrossChainTransfer(t *testing.T) {
+	ec := tools.NewElrondClient("https://devnet-gateway.elrond.com")
+	tp := transactionProc{elrondClient: ec}
 
-	sink := common.NewZeroCopySource(decoded)
+	crossTx, crossChainTxId, assetHash, toChainID, err := tp.computeCrossChainTransfer("dd79517926062cf1a8c0a06bd54c1bdaa96e9e37d2f3cf554da49564f578da6a", 1612920)
 
-	sender, _ := sink.NextBytes(32)
-	fmt.Println(hex.EncodeToString(sender))
-
-	receiver, _ := sink.NextBytes(32)
-	fmt.Println(hex.EncodeToString(receiver))
-
-	lengthNextParam, _ := sink.NextVarUint()
-	fmt.Println(lengthNextParam)
-
-	tokenID, _ := sink.NextBytes(lengthNextParam)
-	fmt.Println(string(tokenID))
-
-	lengthNextParam, _ = sink.NextVarUint()
-	value, _ := sink.NextBytes(lengthNextParam)
-	fmt.Println(big.NewInt(0).SetBytes(value).String())
+	require.Nil(t, err)
+	require.True(t, toChainID > 0)
+	require.NotNil(t, assetHash)
+	require.NotNil(t, crossTx)
+	require.NotNil(t, crossChainTxId)
 }

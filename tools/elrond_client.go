@@ -1,22 +1,31 @@
 package tools
 
 import (
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"math/big"
+	txData "github.com/ElrondNetwork/elrond-go-core/data/transaction"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/blockchain"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/data"
 	"path"
-
-	"github.com/ElrondNetwork/elrond-proxy-go/data"
 )
 
 const (
-	MetachainShardID   = uint32(4294967295)
-	blocksPerEpochPoly = 60000
+	MetachainShardID = uint32(4294967295)
 )
 
 type ElrondClient struct {
 	restUrl    string
 	restClient *RestClient
+}
+
+type GetTransactionResponse struct {
+	Data  GetTransactionResponseData `json:"data"`
+	Error string                     `json:"error"`
+	Code  string                     `json:"code"`
+}
+
+type GetTransactionResponseData struct {
+	Transaction txData.ApiTransactionResult `json:"transaction"`
 }
 
 func NewElrondClient(restUrl string) *ElrondClient {
@@ -41,6 +50,26 @@ func (ec *ElrondClient) ExecuteQuery(vmRequest *data.VmValueRequest) (*data.VmVa
 	return &response.Data, err
 }
 
+func (ec *ElrondClient) GetProof(nodeUrl string, blockRootHash string, address string, key string) (string, string, []string, error) {
+	response := map[string]interface{}{}
+
+	pathAPI := path.Join("proof", "root-hash", blockRootHash, "address", address, "key", key)
+	_, err := ec.restClient.CallGetRestEndPoint(nodeUrl, pathAPI, &response)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	dataTrieProof, okDataTrieProof := getDataTrieProof(response["data"])
+	dataTrieRootHash, okDataTrieRootHash := getDataTrieRootHash(response["data"])
+	mainTrieProof, okMainTrieProof := getMainTreeProof(response["data"])
+
+	if !(okDataTrieProof && okMainTrieProof && okDataTrieRootHash) {
+		return "", "", nil, errors.New("error parse proofs")
+	}
+
+	return dataTrieProof, dataTrieRootHash, mainTrieProof, nil
+}
+
 func (ec *ElrondClient) GetLatestHyperblockNonce() (uint64, error) {
 	response := map[string]interface{}{}
 
@@ -58,8 +87,8 @@ func (ec *ElrondClient) GetLatestHyperblockNonce() (uint64, error) {
 	return nonce, nil
 }
 
-func (ec *ElrondClient) GetHyperblockByNonce(nonce uint64) (*data.Hyperblock, error) {
-	var hyperblockResponse data.HyperblockApiResponse
+func (ec *ElrondClient) GetHyperblockByNonce(nonce uint64) (*data.HyperBlock, error) {
+	var hyperblockResponse data.HyperBlockResponse
 
 	pathAPI := path.Join("hyperblock", "by-nonce", fmt.Sprintf("%d", nonce))
 	_, err := ec.restClient.CallGetRestEndPoint(ec.restUrl, pathAPI, &hyperblockResponse)
@@ -71,35 +100,35 @@ func (ec *ElrondClient) GetHyperblockByNonce(nonce uint64) (*data.Hyperblock, er
 		return nil, fmt.Errorf(hyperblockResponse.Error)
 	}
 
-	return &hyperblockResponse.Data.Hyperblock, nil
+	return &hyperblockResponse.Data.HyperBlock, nil
 }
 
-func (ec *ElrondClient) GetCurrentEpochStartHeight(contractAddress string, chainID int) (uint64, error) {
-	encodedChainID := hex.EncodeToString([]byte(fmt.Sprintf("%d", chainID)))
+func (ec *ElrondClient) GetTransactionByHash(hash string) (*txData.ApiTransactionResult, error) {
+	var transactionResponse GetTransactionResponse
 
-	vmRequest := &data.VmValueRequest{
-		Address:    contractAddress,
-		FuncName:   "currentHeight",
-		CallerAddr: "",
-		CallValue:  "",
-		Args:       []string{encodedChainID},
-	}
-
-	response, err := ec.ExecuteQuery(vmRequest)
+	pathAPI := path.Join("transaction", hash, "?withResults=true")
+	_, err := ec.restClient.CallGetRestEndPoint(ec.restUrl, pathAPI, &transactionResponse)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	bigIntValue := big.NewInt(0).SetBytes(response.Data.ReturnData[0])
-	returnedHeight := bigIntValue.Uint64()
-
-	startOfEpochHeight := returnedHeight % blocksPerEpochPoly * blocksPerEpochPoly
-
-	return startOfEpochHeight, err
+	return &transactionResponse.Data.Transaction, nil
 }
 
-func (ec *ElrondClient) GetChainIDAndMinTxVersion() (string, uint32, error) {
-	return "", 0, nil
+func (ec *ElrondClient) GetTransactionsForHyperblock(nonce uint64) []data.TransactionOnNetwork {
+	ep := blockchain.NewElrondProxy(ec.restUrl, nil)
+
+	hyperblock, _ := ep.GetHyperBlockByNonce(nonce)
+
+	transacrions := make([]data.TransactionOnNetwork, 0)
+
+	for _, tx := range hyperblock.Transactions {
+		if tx.Status == "success" {
+			transacrions = append(transacrions, tx)
+		}
+	}
+
+	return transacrions
 }
 
 func getNonceFromMetachainStatus(nodeStatusData interface{}) (uint64, bool) {
@@ -109,6 +138,45 @@ func getNonceFromMetachainStatus(nodeStatusData interface{}) (uint64, bool) {
 	}
 
 	return getUint(metric), true
+}
+
+func getDataTrieProof(nodeStatusData interface{}) (string, bool) {
+	proofsMap, ok := nodeStatusData.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	dataTrieProofs, ok := proofsMap["dataTrieProof"].([]string)
+	if !ok {
+		return "", false
+	}
+
+	return dataTrieProofs[0], true
+}
+
+func getDataTrieRootHash(nodeStatusData interface{}) (string, bool) {
+	proofsMap, ok := nodeStatusData.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	dataTrieRootHash, ok := proofsMap["dataTrieRootHash"].(string)
+	if !ok {
+		return "", false
+	}
+
+	return dataTrieRootHash, true
+}
+
+func getMainTreeProof(nodeStatusData interface{}) ([]string, bool) {
+	proofsMap, ok := nodeStatusData.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	mainProof, ok := proofsMap["mainProof"].([]string)
+	if !ok {
+		return nil, false
+	}
+
+	return mainProof, true
 }
 
 func getMetric(nodeStatusData interface{}, metric string) (interface{}, bool) {

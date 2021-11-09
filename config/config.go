@@ -14,7 +14,7 @@ const (
 	ERD_MONITOR_INTERVAL  = 15 * time.Second
 	POLY_MONITOR_INTERVAL = 1 * time.Second
 
-	ERD_USEFUL_BLOCK_NUM     = 3
+	ERD_USEFUL_BLOCK_NUM = 3
 )
 
 type ServiceConfig struct {

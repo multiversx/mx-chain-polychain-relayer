@@ -1,9 +1,15 @@
 package manager
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/ElrondNetwork/elrond-sdk-erdgo/interactors"
+	"github.com/ontio/ontology-crypto/keypair"
+	"math/big"
 	"math/rand"
 	"time"
 
@@ -11,17 +17,21 @@ import (
 	"github.com/ElrondNetwork/elrond-polychain-relayer/db"
 	"github.com/ElrondNetwork/elrond-polychain-relayer/log"
 	"github.com/ElrondNetwork/elrond-polychain-relayer/tools"
-	"github.com/ElrondNetwork/elrond-sdk/erdgo"
-	poly_go_sdk "github.com/polynetwork/poly-go-sdk"
+	"github.com/ontio/ontology-crypto/signature"
+	polygosdk "github.com/polynetwork/poly-go-sdk"
 	"github.com/polynetwork/poly/common"
 	vconfig "github.com/polynetwork/poly/consensus/vbft/config"
 	polytypes "github.com/polynetwork/poly/core/types"
 	common2 "github.com/polynetwork/poly/native/service/cross_chain_manager/common"
 )
 
+const (
+	SIGNATURE_LENGTH = 67
+)
+
 type PolyManager struct {
 	syncedHeight uint32
-	polySdk      *poly_go_sdk.PolySdk
+	polySdk      *polygosdk.PolySdk
 	exitChan     chan int
 	db           *db.BoltDB
 	cfg          *config.ServiceConfig
@@ -30,38 +40,10 @@ type PolyManager struct {
 	crossChainManager      string
 	crossChainManagerProxy string
 	senders                []*ElrondSender
+	pks                    []byte
 }
 
-func (pm *PolyManager) init() bool {
-	if pm.syncedHeight > 0 {
-		log.Infof("PolyManager init - start height from flag: %d", pm.syncedHeight)
-		return true
-	}
-
-	pm.syncedHeight = pm.db.GetPolyHeight()
-	latestHeight := pm.findLatestHeight()
-	if latestHeight > pm.syncedHeight {
-		pm.syncedHeight = latestHeight
-		log.Infof("PolyManager init - synced height from ECCM: %d", pm.syncedHeight)
-		return true
-	}
-
-	log.Infof("PolyManager init - synced height from DB: %d", pm.syncedHeight)
-
-	return true
-}
-
-func (pm *PolyManager) findLatestHeight() uint32 {
-	epochStartHeight, err := pm.elrondClient.GetCurrentEpochStartHeight(pm.cfg.ElrondConfig.BlockHeaderSyncContract, pm.cfg.PolyConfig.ChainID)
-	if err != nil {
-		log.Errorf("findLatestHeight - GetEpochStartHeight failed: %s", err.Error())
-		return 0
-	}
-
-	return uint32(epochStartHeight)
-}
-
-func NewPolyManager(cfg *config.ServiceConfig, polySdk *poly_go_sdk.PolySdk, elrondClient *tools.ElrondClient, boltDB *db.BoltDB) (*PolyManager, error) {
+func NewPolyManager(cfg *config.ServiceConfig, polySdk *polygosdk.PolySdk, elrondClient *tools.ElrondClient, boltDB *db.BoltDB) (*PolyManager, error) {
 	senders := make([]*ElrondSender, 0)
 
 	keysStoreFiles, err := tools.GetAllKeyStoreFiles(cfg.ElrondConfig.KeyStorePath)
@@ -77,12 +59,13 @@ func NewPolyManager(cfg *config.ServiceConfig, polySdk *poly_go_sdk.PolySdk, elr
 			return nil, errGetAddr
 		}
 
-		privKey, errLoad := erdgo.LoadPrivateKeyFromJsonFile(keyStore, keysStoreFilesPW[bech32Addr])
+		wallet := interactors.NewWallet()
+		privKey, errLoad := wallet.LoadPrivateKeyFromJsonFile(keyStore, keysStoreFilesPW[bech32Addr])
 		if errLoad != nil {
 			return nil, errLoad
 		}
 
-		sender, errSender := NewElrondSender(privKey, cfg.ElrondConfig)
+		sender, errSender := NewElrondSender(privKey, cfg)
 		if errSender != nil {
 			continue
 		}
@@ -104,7 +87,17 @@ func NewPolyManager(cfg *config.ServiceConfig, polySdk *poly_go_sdk.PolySdk, elr
 	return polyManager, nil
 }
 
+func (pm *PolyManager) Stop() {
+	pm.exitChan <- 1
+	close(pm.exitChan)
+	log.Infof("poly chain manager exit.")
+}
+
 func (pm *PolyManager) MonitorChain() {
+	ret := pm.init()
+	if ret == false {
+		log.Errorf("MonitorChain - init failed\n")
+	}
 	fetchBlockTicker := time.NewTicker(time.Second * time.Duration(pm.cfg.PolyConfig.PolyMonitorIntervalSeconds))
 	var blockHandleResult bool
 
@@ -129,7 +122,7 @@ func (pm *PolyManager) MonitorChain() {
 				if pm.syncedHeight%10 == 0 {
 					log.Infof("handle confirmed poly Block height: %d", pm.syncedHeight)
 				}
-				blockHandleResult = pm.handleDepositEvents(pm.syncedHeight, latestHeight)
+				blockHandleResult = pm.handleDepositEvents(pm.syncedHeight)
 				if blockHandleResult == false {
 					break
 				}
@@ -145,39 +138,79 @@ func (pm *PolyManager) MonitorChain() {
 	}
 }
 
-func (pm *PolyManager) handleDepositEvents(height, latest uint32) bool {
-	log.Infof("PolyManager handleDepositEvents at height %d, latest height %d\n", height, latest)
+func (pm *PolyManager) IsNewEpoch(hdr *polytypes.Header, getRawBookkeepers func() []byte) (bool, []byte, error) {
+	blkInfo := &vconfig.VbftBlockInfo{}
+	if err := json.Unmarshal(hdr.ConsensusPayload, blkInfo); err != nil {
+		return false, nil, fmt.Errorf("commitHeader - unmarshal blockInfo error: %s", err)
+	}
+	if hdr.NextBookkeeper == common.ADDRESS_EMPTY || blkInfo.NewChainConfig == nil {
+		return false, nil, nil
+	}
 
-	latestEpochStartHeight := pm.findLatestHeight()
+	rawKeepers := getRawBookkeepers()
+
+	var bookkeepers []keypair.PublicKey
+	for _, peer := range blkInfo.NewChainConfig.Peers {
+		keystr, _ := hex.DecodeString(peer.ID)
+		key, _ := keypair.DeserializePublicKey(keystr)
+		bookkeepers = append(bookkeepers, key)
+	}
+	bookkeepers = keypair.SortPublicKeys(bookkeepers)
+	publickeys := make([]byte, 0)
+	sink := common.NewZeroCopySink(nil)
+	sink.WriteUint64(uint64(len(bookkeepers)))
+	for _, key := range bookkeepers {
+		raw := tools.GetNoCompressKey(key)
+		publickeys = append(publickeys, raw...)
+		sink.WriteBytes(raw)
+	}
+	if bytes.Equal(rawKeepers, publickeys) {
+		return false, nil, nil
+	}
+	return true, publickeys, nil
+}
+
+func (pm *PolyManager) init() bool {
+	if pm.syncedHeight > 0 {
+		log.Infof("PolyManager init - start height from flag: %d", pm.syncedHeight)
+		return true
+	}
+
+	pm.syncedHeight = pm.db.GetPolyHeight()
+	latestHeight := pm.getCurrentEpochStartHeight()
+	if latestHeight > pm.syncedHeight {
+		pm.syncedHeight = latestHeight
+		log.Infof("PolyManager init - synced height from ECCM: %d", pm.syncedHeight)
+		return true
+	}
+
+	log.Infof("PolyManager init - synced height from DB: %d", pm.syncedHeight)
+
+	return true
+}
+
+func (pm *PolyManager) handleDepositEvents(height uint32) bool {
+
+	sender := pm.selectSender()
+	latestEpochStartHeight := pm.getCurrentEpochStartHeight()
 	hdr, err := pm.polySdk.GetHeaderByHeight(height + 1)
 	if err != nil {
 		log.Errorf("PolyManager handleBlockHeader - GetNodeHeader on height :%d failed", height)
 		return false
 	}
 
-	isCurr := latestEpochStartHeight <= height
-	info := &vconfig.VbftBlockInfo{}
-
-	err = json.Unmarshal(hdr.ConsensusPayload, info)
+	isCurr := latestEpochStartHeight < height+1
+	isNewEpoch, pubkList, err := pm.IsNewEpoch(hdr, sender.GetBookkeepers)
 	if err != nil {
-		log.Errorf("PolyManager failed to unmarshal ConsensusPayload for height %d: %v", height+1, err)
+		log.Errorf("falied to check isEpoch: %v", err)
 		return false
 	}
 
-	isEpoch := hdr.NextBookkeeper != common.ADDRESS_EMPTY && info.NewChainConfig != nil
+	anchor, hp := pm.getHeaderProofWithAnchor(isCurr, isNewEpoch, latestEpochStartHeight, height)
 
-	var (
-		anchor *polytypes.Header
-		hp     string
-	)
-	if !isCurr {
-		anchor, _ = pm.polySdk.GetHeaderByHeight(latestEpochStartHeight + 1)
-		proof, _ := pm.polySdk.GetMerkleProof(height+1, latestEpochStartHeight+1)
-		hp = proof.AuditPath
-	} else if isEpoch {
-		anchor, _ = pm.polySdk.GetHeaderByHeight(height + 2)
-		proof, _ := pm.polySdk.GetMerkleProof(height+1, height+2)
-		hp = proof.AuditPath
+	if err := pm.verifyHeader(hdr, anchor, hp, isCurr); err != nil {
+		log.Errorf("PolyManager handleDepositEvents - get block event at height:%d error: %s", height, err.Error())
+		return false
 	}
 
 	cnt := 0
@@ -219,54 +252,189 @@ func (pm *PolyManager) handleDepositEvents(height, latest uint32) bool {
 
 			var isTarget bool
 			if len(pm.cfg.TargetContracts) > 0 {
-				toContractStr := tools.ToElrondAddress(param.MakeTxParam.ToContractAddress)
-				for _, v := range pm.cfg.TargetContracts {
-					toChainIdArr, ok := v[toContractStr]
-					if ok {
-						if len(toChainIdArr["inbound"]) == 0 {
-							isTarget = true
-							break
-						}
-						for _, id := range toChainIdArr["inbound"] {
-							if id == param.FromChainID {
-								isTarget = true
-								break
-							}
-						}
-						if isTarget {
-							break
-						}
-					}
-				}
+				isTarget = pm.filterEvents(param)
 				if !isTarget {
 					continue
 				}
-
-				cnt++
-				sender := pm.selectSender()
-				sender.CommitDepositEventsWithHeader(hdr, param, hp, anchor, event.TxHash, auditpath)
 			}
+
+			cnt++
+			sender := pm.selectSender()
+			log.Infof("sender %s is handling poly tx ( hash: %s, height: %d )",
+				sender.address, event.TxHash, height)
+			sender.CommitDepositEventsWithHeader(hdr, param, hp, anchor, event.TxHash, auditpath)
+
 		}
 	}
 
-	if !(cnt == 0 && isEpoch && isCurr) {
-		return true
-	}
-
-	sender := pm.selectSender()
-	err = sender.CommitHeader(hdr)
-	if err != nil {
-		log.Errorf("PolyManager handleDepositEvents - failed to commit header err: %v", err)
-		return false
+	if cnt == 0 && isNewEpoch && isCurr {
+		sender := pm.selectSender()
+		err = sender.CommitHeader(hdr, pubkList)
+		if err != nil {
+			log.Errorf("PolyManager failed to commit header err: %v", err)
+			return false
+		}
 	}
 
 	return true
 }
 
 func (pm *PolyManager) selectSender() *ElrondSender {
-	maxIndex := len(pm.senders)
+	var senders []*ElrondSender
+	for _, v := range pm.senders {
+		balance, err := v.GetBalance()
+		if err != nil {
+			log.Errorf("failed to get balance for %s: %v", v.address, err)
+			continue
+		}
+		zero := big.NewInt(0)
+		if res := balance.Cmp(zero); res == 1 {
+			senders = append(senders, v)
+		}
+	}
 
-	idx := rand.Intn(maxIndex)
+	maxIndex := len(senders)
+	if senders != nil && maxIndex > 0 {
+		senderId := rand.Intn(maxIndex)
+		return senders[senderId]
+	}
+	return pm.senders[0]
+}
 
-	return pm.senders[idx]
+func (pm *PolyManager) getCurrentEpochStartHeight() uint32 {
+	sender := pm.selectSender()
+
+	epochStartHeight, err := sender.GetCurrentEpochStartHeight(pm.cfg.ElrondConfig.BlockHeaderSyncContract)
+	if err != nil {
+		log.Errorf("findLatestHeight - GetEpochStartHeight failed: %s", err.Error())
+		return 0
+	}
+
+	return uint32(epochStartHeight)
+}
+
+func (pm *PolyManager) filterEvents(param *common2.ToMerkleValue) bool {
+	isTarget := false
+	toContractStr := tools.ToElrondAddress(param.MakeTxParam.ToContractAddress)
+	for _, v := range pm.cfg.TargetContracts {
+		toChainIdArr, ok := v[toContractStr]
+		if ok {
+			if len(toChainIdArr["inbound"]) == 0 {
+				isTarget = true
+				break
+			}
+			for _, id := range toChainIdArr["inbound"] {
+				if id == param.FromChainID {
+					isTarget = true
+					break
+				}
+			}
+			if isTarget {
+				break
+			}
+		}
+	}
+	return isTarget
+}
+
+func (pm *PolyManager) updatePubKeys(pubkList []byte) {
+	if pubkList != nil {
+		pm.pks = pubkList
+	}
+}
+
+func (pm *PolyManager) verifySigs(hdr *polytypes.Header) bool {
+	sigs := make([]*signature.Signature, 0, 0)
+	for _, rawSig := range hdr.SigData {
+		temp := make([]byte, len(rawSig))
+		copy(temp, rawSig)
+		sig, _ := signature.Deserialize(temp)
+		sigs = append(sigs, sig)
+	}
+
+	nrOfValidSignatures := 0
+
+	nrOfPks := len(pm.pks) / SIGNATURE_LENGTH
+	for pkIndex := 0; pkIndex < nrOfPks; pkIndex++ {
+		rawKey := pm.pks[pkIndex*SIGNATURE_LENGTH : (pkIndex+1)*SIGNATURE_LENGTH]
+		for _, sig := range sigs {
+			sigRaw, _ := signature.Serialize(sig)
+			sigRaw, _ = ConvertToErdCompatible(sigRaw)
+			hashRawHdr := sha256.Sum256(hdr.GetMessage())
+
+			err := tools.VerifySecp256k1(rawKey[2:], hashRawHdr[:], sigRaw) // first 2 bytes represents key header
+			if err == nil {
+				nrOfValidSignatures++
+				break
+			}
+		}
+	}
+	return nrOfValidSignatures == len(sigs) || len(pm.pks) == 0
+}
+
+func (pm *PolyManager) getHeaderProofWithAnchor(isCurr bool, isNewEpoch bool, latestEpochStartHeight uint32, height uint32) (*polytypes.Header, string) {
+	var (
+		anchor *polytypes.Header
+		hp     string
+	)
+	if !isCurr {
+		anchor, _ = pm.polySdk.GetHeaderByHeight(latestEpochStartHeight + 1)
+		proof, _ := pm.polySdk.GetMerkleProof(height+1, latestEpochStartHeight+1)
+		hp = proof.AuditPath
+	} else if isNewEpoch {
+		anchor, _ = pm.polySdk.GetHeaderByHeight(height + 2)
+		proof, _ := pm.polySdk.GetMerkleProof(height+1, height+2)
+		hp = proof.AuditPath
+	}
+
+	return anchor, hp
+}
+
+func (pm *PolyManager) verifyHeader(hdr *polytypes.Header, anchor *polytypes.Header, hp string, isCurr bool) error {
+	if isCurr {
+		if headerIntegrity := pm.verifySigs(hdr); headerIntegrity == false {
+			return errors.New(fmt.Sprintf("falied to check signatures for PolyNetwork Header: %v with nonce: %d", hdr.Hash(), hdr.Height))
+		}
+	} else {
+		rawProof, _ := hex.DecodeString(hp)
+		rawLeaf := tools.MerkleProve(rawProof, anchor.BlockRoot[:])
+		headerHash := hdr.Hash()
+		if rawLeaf == nil || bytes.Compare(rawLeaf, headerHash.ToArray()) != 0 {
+			return errors.New(fmt.Sprintf("falied to check proof for PolyNetwork Header: %v with nonce: %d", hdr.Hash(), hdr.Height))
+		}
+	}
+	return nil
+}
+
+// ConvertToErdCompatible 0x30 <length of whole message> <0x02> <length of R> <R> 0x2 <length of S> <S>
+func ConvertToErdCompatible(sig []byte) ([]byte, error) {
+	s, err := signature.Deserialize(sig)
+	if err != nil {
+		return nil, err
+	}
+
+	t, ok := s.Value.([]byte)
+	if !ok {
+		return nil, errors.New("invalid signature type")
+	}
+
+	if len(t) != 65 {
+		return nil, errors.New("invalid signature length")
+	}
+
+	v := t[0]
+	copy(t, t[1:])
+	t[64] = v
+
+	sol := make([]byte, 2)
+	sol[0] = 0x30
+	sol[1] = uint8(len(t)) + 3           // 4 for R and S length and 0x02 magic number
+	sol = append(sol, 0x02)              // magic number
+	sol = append(sol, 32)                // length of R
+	sol = append(sol, t[:32]...)         // R
+	sol = append(sol, 0x02)              // magic number
+	sol = append(sol, 32)                // length of S
+	sol = append(sol, t[32:len(t)-1]...) // S
+
+	return sol[0:], nil
 }
