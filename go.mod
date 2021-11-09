@@ -7,7 +7,6 @@ require (
 	github.com/ElrondNetwork/elrond-go-crypto v1.0.1
 	github.com/ElrondNetwork/elrond-go-logger v1.0.5
 	github.com/ElrondNetwork/elrond-sdk-erdgo v1.0.3
-
 	github.com/boltdb/bolt v1.3.1
 	github.com/btcsuite/btcd v0.22.0-beta
 	github.com/cmars/basen v0.0.0-20150613233007-fe3947df716e // indirect
