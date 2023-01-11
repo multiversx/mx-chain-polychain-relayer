@@ -6,7 +6,7 @@
 This program is still under developing!
 
 
-Elrond Relayer is an important character of Poly cross-chain interactive protocol which is responsible for relaying cross-chain transaction from and to MultiversX.
+MultiversX Relayer is an important character of Poly cross-chain interactive protocol which is responsible for relaying cross-chain transaction from and to MultiversX.
 
 ***
 
