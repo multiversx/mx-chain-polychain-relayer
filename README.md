@@ -1,4 +1,4 @@
-# Elrond-Relayer
+# MultiversX-Relayer
 
 ***
 
@@ -6,7 +6,7 @@
 This program is still under developing!
 
 
-Elrond Relayer is an important character of Poly cross-chain interactive protocol which is responsible for relaying cross-chain transaction from and to Elrond.
+MultiversX Relayer is an important character of Poly cross-chain interactive protocol which is responsible for relaying cross-chain transaction from and to MultiversX.
 
 ***
 
@@ -20,17 +20,17 @@ Elrond Relayer is an important character of Poly cross-chain interactive protoco
 ### Build
 
 ```shell
-git clone https://github.com/ElrondNetwork/elrond-polychain-relayer.git
-cd elrond-polychain-relayer
-go build -o elrond-polychain-relayer main.go
+git clone https://github.com/multiversx/mx-chain-polychain-relayer
+cd mx-chain-polychain-relayer
+go build -o mx-chain-polychain-relayer main.go
 ```
 
 ## Run Relayer
 
 Before you can run the relayer you will need to create a wallet file of PolyNetwork. After creation, you need to register it as a Relayer to Poly net and get consensus nodes approving your registeration. And then you can send transaction to Poly net and start relaying.
 
-After that, make sure you already have a Elrond wallet with EGLD.
-- [Docs](https://docs.elrond.com/wallet/web-wallet/)
+After that, make sure you already have a MultiversX wallet with EGLD.
+- [Docs](https://docs.multiversx.com/wallet/web-wallet/)
 
 Before running, you need feed the configuration file `config.json`.
 
